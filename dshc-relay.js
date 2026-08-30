@@ -188,6 +188,13 @@ function push(msg) {
   return msg
 }
 
+// ---- hardening: sanitize + limits (defense in depth; real moderation still happens at the plugin) ----
+const MAX_TEXT = 4000, MAX_NICK = 32, MAX_BODY = 64 * 1024
+const cleanText = (s) => String(s || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, MAX_TEXT)
+const cleanNick = (s) => String(s || '?').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F<>]/g, '').trim().slice(0, MAX_NICK) || '?'
+const validPeer = (s) => /^https?:\/\/[^\s\/]+(?::\d+)?(?:\/[^\s]*)?$/i.test(String(s || '')) && !/@/.test(s) && !/^(file|ftp|javascript|unix|data|ws|wss):/i.test(s)
+function collectBody(req, cb) { let n = 0, body = ''; let done = false; const finish = (err) => { if (done) return; done = true; cb(err, body) }; req.on('data', c => { n += c.length; if (n > MAX_BODY) { finish(new Error('body too large')) } else body += c }); req.on('end', () => finish(null)); req.on('error', () => finish(new Error('stream error'))) }
+
 // ---- HTTP server ----
 const server = http.createServer((req, res) => {
   try {
@@ -211,13 +218,12 @@ const server = http.createServer((req, res) => {
       return
     }
     if (path === '/peers' && req.method === 'POST') {
-      let body = ''
-      req.on('data', c => { body += c })
-      req.on('end', () => {
+      collectBody(req, (err, body) => {
         try {
+          if (err) { res.writeHead(413); res.end('too large'); return }
           const p = JSON.parse(body)
           const url = String(p.url || '').replace(/\/$/, '')
-          if (p.action === 'add' && url && !peers.includes(url)) { peers.push(url); peerSince.delete(url) }
+          if (p.action === 'add' && validPeer(url) && !peers.includes(url)) { peers.push(url); peerSince.delete(url) }
           else if (p.action === 'remove' && url) { peers = peers.filter(x => x !== url); peerSince.delete(url) }
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ peers }))
@@ -226,17 +232,16 @@ const server = http.createServer((req, res) => {
       return
     }
     if (path === '/inject' && req.method === 'POST') {
-      let body = ''
-      req.on('data', c => { body += c })
-      req.on('end', () => {
+      collectBody(req, (err, body) => {
         try {
+          if (err) { res.writeHead(413); res.end('too large'); return }
           const frames = JSON.parse(body)
           const list = Array.isArray(frames) ? frames : [frames]
           const accepted = []
           for (const f of list) {
             const msgId = String(f.msgId || '')
             if (!msgId || seen.has(msgId)) continue
-            accepted.push(push({ msgId, nodeId: String(f.nodeId || name), nick: String(f.nick || '?'), text: String(f.text || ''), ts: Number(f.ts) || Date.now() }))
+            accepted.push(push({ msgId, nodeId: String(f.nodeId || name), nick: cleanNick(f.nick), color: /^#[0-9a-fA-F]{6}$/.test(String(f.color || '')) ? f.color : '#4D6BFE', text: cleanText(f.text), ts: Number(f.ts) || Date.now() }))
           }
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ accepted: accepted.length, lastIdx: nextIdx - 1 }))

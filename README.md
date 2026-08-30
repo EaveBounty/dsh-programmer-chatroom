@@ -24,6 +24,7 @@
 - [Release](#release)
 - [Contributing](CONTRIBUTING.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Security audit](docs/SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
 ## Overview
@@ -32,10 +33,16 @@
   `0.0.0.0`, making every machine a real server. Nodes pull/merge messages over HTTP with global `msgId`
   dedup — no central server, any online machine can relay.
 - **Content moderation**: every node filters each message offline with an embedded **DFA sensitive-word
-  filter + Chinese lexicon**. Blocked messages never enter the room and are logged; warned messages pass
-  but are recorded.
+  filter + Chinese lexicon**. Blocked messages never enter the room and are dropped **silently** — no
+  records, no monitoring page, zero perceptible feedback (see `docs/SECURITY.md`).
 - **WeChat/QQ-style UI**: chat bubbles, colored avatars, emoji picker, sticker pack, an ✨ Enjoy button,
-  and live peer-node management.
+  live peer-node management, and a **member roster**.
+- **Theme-aware**: the panel reads the shell's `--dsw-alias-*` tokens, so it follows DeepSeek's dark/light
+  appearance automatically (dark → current palette, light → white/blue).
+- **Member identity**: each machine gets a stable deviceId with an **auto-assigned unique avatar color and
+  random, collision-avoided nickname**; editable in the **Settings** tab.
+- **One-click cpolar tunnel**: install command + start/stop inside the Settings tab; the plugin manages
+  the process and stops it automatically when the chat/plugin closes.
 - **No persistence**: history lives only in the memory of online machines; it disappears when all are off.
 
 ## Why decentralized?
@@ -94,9 +101,13 @@ node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567
 1. Load the plugin in a DSH session; a **💬 Chat** button appears in the sidebar footer.
 2. Open the floating panel — the top bar shows **🟢 Companion relay enabled · port**.
 3. **Chat** tab: read/write messages (Enter to send), manage peer nodes.
-   **Monitor** tab: blocked/flagged messages with reason.
-4. To mesh with another DSH instance: in **Connected relay nodes**, enter
+   **Members** tab: see who is online. **Settings** tab: edit your nickname/avatar color, and one-click
+   start/stop the cpolar tunnel.
+4. To mesh with another DSH instance: in **已连接的节点**, enter
    `http://<other-machine-IP>:<other-port>` → **Add node**. Add each other mutually.
+5. Across NAT: open the **Settings** tab → **内网穿透** → install cpolar (`npm i -g cpolar`, free account
+   `cpolar authtoken <token>`) → **一键启动穿透**. Share the resulting public URL with remote machines;
+   the tunnel stops automatically when the chat/plugin closes.
 
 ## How P2P works
 
@@ -116,17 +127,20 @@ Machine A                                            Machine B
 
 - **Same LAN**: both relays bind `0.0.0.0`; each side fills the other's LAN IP. Verified: the plugin
   spawns a relay reachable at `http://<machine-IP>:<port>/health` → 200.
-- **Across NAT / public internet**: needs STUN hole-punching + optional TURN relay inside the companion
-  process. The relay already exposes `--peer` / `--peers-file` hooks; full traversal requires a public
-  rendezvous/TURN endpoint — a planned enhancement.
+- **Across NAT / public internet**: the relay has STUN hole-punching + TURN/rendezvous hooks, but the
+  **recommended one-click path is cpolar**: start a tunnel to `127.0.0.1:<relayPort>` from the Settings
+  tab, share the public URL, and remote machines add it as a peer node. The plugin auto-stops the tunnel
+  with the chat.
 
 ## Content moderation
 
 - **DFA sensitive-word lexicon** (embedded Chinese): politics, drugs, gambling/fraud/money-laundering,
   porn, violence/harassment, malware/attacks, illegal trading.
 - **Regex augmentation**: API keys/secrets, ID-card numbers, phone numbers.
-- Block → not delivered; Warn → delivered but logged. Edit the `LEXICON` array in the Host half and
-  publish a new Package to change rules.
+- Blocking is **silent and end-to-end**: a blocked message is dropped on the sending node **before** it
+  can reach any peer (never written to outbox/relay/mesh), and no record is exposed anywhere — no
+  monitoring page, no sender feedback. See `docs/SECURITY.md`.
+- Edit the `LEXICON` array in the Host half and publish a new Package to change rules.
 
 ## Project layout
 
