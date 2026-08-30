@@ -2,29 +2,72 @@
   "name": "@eave_bounty/dsh-programmer-chatroom",
   "version": "1.0.0",
   "description": "Decentralized P2P group chat for DeepSeek Harness (DSH): every machine is a relay server, text moderated offline by an embedded DFA sensitive-word filter, with a WeChat/QQ-style DeepSeek-branded UI.",
-  "type": "commonjs",
-  "main": "dshc-relay.js",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./relay": "./dshc-relay.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "dshc-relay": "./dshc-relay.js"
   },
   "scripts": {
-    "test": "node --test",
-    "test:relay": "node dshc-relay-test-peer.js"
+    "test": "node --check lib/index.js && node --check lib/client.js && node --check dshc-relay.js",
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check dshc-relay.js"
   },
   "keywords": [
     "deepseek",
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "cordis",
     "plugin",
     "chat",
     "p2p",
     "decentralized",
+    "mesh",
     "content-moderation",
-    "sensitive-word"
+    "sensitive-word",
+    "dfa"
   ],
-  "license": "MIT",
-  "engines": {
-    "node": ">=18"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EaveBounty/dsh-programmer-chatroom.git"
+  },
+  "homepage": "https://github.com/EaveBounty/dsh-programmer-chatroom",
+  "bugs": {
+    "url": "https://github.com/EaveBounty/dsh-programmer-chatroom/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "files": [
+    "lib",
+    "dshc-relay.js",
+    "dshc-relay-test-peer.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "docs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
   }
 }

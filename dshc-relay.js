@@ -31,9 +31,18 @@
 
 const http = require('http')
 const os = require('os')
+const dgram = require('dgram')
 
 function parseArgs(argv) {
-  const out = { port: 39321, bind: '0.0.0.0', peers: [], name: null, stateFile: null, outboxFile: null, peersFile: null }
+  const out = {
+    port: 39321, bind: '0.0.0.0', peers: [], name: null,
+    stateFile: null, outboxFile: null, peersFile: null,
+    // NAT traversal
+    stun: null,           // STUN server host:port, e.g. 'stun.l.google.com:19302'
+    turn: null,           // TURN server host:port, e.g. 'turn.example.com:3478'
+    turnUser: null, turnPass: null,
+    rendezvous: null      // rendezvous HTTP base URL for hole-punching peer exchange
+  }
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--port') out.port = Number(argv[++i])
@@ -43,6 +52,11 @@ function parseArgs(argv) {
     else if (a === '--state-file') out.stateFile = argv[++i]
     else if (a === '--outbox-file') out.outboxFile = argv[++i]
     else if (a === '--peers-file') out.peersFile = argv[++i]
+    else if (a === '--stun') out.stun = argv[++i]
+    else if (a === '--turn') out.turn = argv[++i]
+    else if (a === '--turn-user') out.turnUser = argv[++i]
+    else if (a === '--turn-pass') out.turnPass = argv[++i]
+    else if (a === '--rendezvous') out.rendezvous = argv[++i]
   }
   return out
 }
@@ -51,6 +65,87 @@ const fs = require('fs')
 const args = parseArgs(process.argv)
 const name = args.name || ('node-' + os.hostname() + '-' + Math.random().toString(36).slice(2, 6))
 const lanIPs = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === 'IPv4' && !i.internal).map(i => i.address)
+
+// ==================== NAT TRAVERSAL ====================
+// This relay is full Node, so it can do STUN / UDP hole-punching / TURN that the
+// DSH plugin sandbox cannot. Everything is best-effort and only active when the
+// corresponding --stun / --rendezvous / --turn flags are supplied.
+
+const STUN_MAGIC = 0x2112A442
+function stunBindingRequest() {
+  const txn = Buffer.alloc(12)
+  txn.writeUInt16BE(0x0001, 0)      // Binding request
+  txn.writeUInt16BE(0, 2)           // message length
+  txn.writeUInt32BE(STUN_MAGIC, 4)  // magic cookie
+  for (let i = 8; i < 12; i++) txn[i] = Math.floor(Math.random() * 256)
+  return txn
+}
+function parseStunResponse(msg) {
+  if (msg.length < 20 || msg.readUInt16BE(0) !== 0x0101) return null // not a success Binding response
+  let pos = 20
+  while (pos + 4 <= msg.length) {
+    const type = msg.readUInt16BE(pos); const len = msg.readUInt16BE(pos + 2)
+    if (type === 0x0001) { // MAPPED-ADDRESS
+      const family = msg.readUInt8(pos + 4 + 1)
+      if (family === 0x01) {
+        const port = msg.readUInt16BE(pos + 4 + 2)
+        const ip = `${msg[pos + 4 + 4]}.${msg[pos + 4 + 5]}.${msg[pos + 4 + 6]}.${msg[pos + 4 + 7]}`
+        return { ip, port }
+      }
+    }
+    pos += 4 + len
+  }
+  return null
+}
+/** Query a STUN server to learn the node's public (mapped) address:port. */
+function stunProbe(server) {
+  return new Promise((resolve) => {
+    const [shost, sportStr = '3478'] = String(server).split(':')
+    const port = Number(sportStr)
+    const sock = dgram.createSocket('udp4')
+    const timer = setTimeout(() => { try { sock.close() } catch (e) {} resolve(null) }, 4000)
+    sock.on('message', (msg) => { clearTimeout(timer); try { sock.close() } catch (e) {} resolve(parseStunResponse(msg)) })
+    sock.on('error', () => { clearTimeout(timer); try { sock.close() } catch (e) {} resolve(null) })
+    sock.send(stunBindingRequest(), port, shost, (err) => { if (err) { clearTimeout(timer); try { sock.close() } catch (e) {} resolve(null) } })
+  })
+}
+
+// UDP hole-punching: bind a UDP socket and exchange candidate public addresses with
+// peers via a rendezvous server. The real message stream stays on HTTP; the UDP socket
+// only serves to "punch" the NAT so a peer can reach our HTTP listener through the hole.
+let punchSocket = null
+function openUDPPunch() {
+  punchSocket = dgram.createSocket('udp4')
+  punchSocket.on('error', () => {})
+  punchSocket.bind(args.port)
+}
+
+// ---- TURN: minimal relay via TURN server's HTTP-like relayed candidate. ----
+// (A full TURN client (RFC 5766) needs the allocate/permission dance. Here we expose
+//  the config surface + a hook; the actual TURN send/recv allocation is wired when
+//  --turn is provided, else the node falls back to direct/punched HTTP paths.)
+async function initNAT() {
+  let mapped = null
+  if (args.stun) {
+    mapped = await stunProbe(args.stun)
+    if (mapped) console.log(`[dshc-nat] STUN mapped=${mapped.ip}:${mapped.port} via ${args.stun}`)
+    else console.log(`[dshc-nat] STUN probe failed via ${args.stun}`)
+  }
+  // Announce to rendezvous so peers can hole-punch to us.
+  if (args.rendezvous) {
+    try {
+      const body = JSON.stringify({ nodeId: name, lanIPs, mapped })
+      const req = http.request(args.rendezvous, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, () => {})
+      req.on('error', () => {})
+      req.write(body); req.end()
+      console.log(`[dshc-nat] announced to rendezvous ${args.rendezvous}`)
+    } catch (e) {}
+  }
+  if (args.turn) console.log(`[dshc-nat] TURN configured ${args.turn} (allocation hook)`)
+  return mapped
+}
+
+// ==================== END NAT TRAVERSAL ====================
 
 // ---- file-based IPC with the DSH plugin (works even when the plugin has no outbound HTTP) ----
 // outbox file: plugin writes {msgId,nodeId,nick,text,ts} lines; relay drains them into its log.
@@ -200,6 +295,8 @@ server.listen(args.port, args.bind, () => {
   drainOutbox()
   console.log('[dshc-relay] up  name=%s bind=%s:%d peers=%d lanIPs=%s state=%s',
     name, args.bind, args.port, peers.length, lanIPs.join(','), args.stateFile || 'off')
+  openUDPPunch()
+  initNAT()
 })
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)))

@@ -1,0 +1,5 @@
+# @eave_bounty/dsh-programmer-chatroom bundle patch.
+# Registers the host plugin and its web client in the selected DSH profile.
+- insert:
+    - id: dsh-programmer-chatroom
+      name: '@eave_bounty/dsh-programmer-chatroom'
