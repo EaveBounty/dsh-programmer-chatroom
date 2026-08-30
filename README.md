@@ -50,17 +50,40 @@ The fix: the plugin uses the host `subprocess` service to spawn an **external No
 
 ## Install
 
-The chat plugin is defined as a dynamic Cordis plugin (via `cordis_define`) and the relay is a plain Node
-script. To run it inside a DSH session, load the plugin package; it will auto-spawn the relay through the
-host `subprocess` service.
+This is a **standard DSH plugin package**, installable from npm and loadable in a DSH web profile.
 
-Standalone relay (for LAN peers / debugging):
+### From npm
 
 ```bash
-node dshc-relay.js --port 39321 --bind 0.0.0.0 --name nodeA
+# install into your DSH profile (recommended)
+dsh plugin --profile web add @eave_bounty/dsh-programmer-chatroom
+
+# or install the npm package globally
+npm install -g @eave_bounty/dsh-programmer-chatroom
 ```
 
-Test peer client:
+After installing, **restart DSH** — the plugin loads automatically and a **💬 Chat** button appears in the
+sidebar footer of your web profile.
+
+### From source / local path
+
+```bash
+dsh plugin --profile web add <path-to-this-repo>
+# or
+pnpm add file:<path-to-this-repo>
+```
+
+### Standalone relay (LAN peers / debugging / NAT)
+
+```bash
+# run the companion relay on 0.0.0.0
+node dshc-relay.js --port 39321 --bind 0.0.0.0 --name nodeA
+
+# optional NAT traversal (STUN + rendezvous + TURN)
+node dshc-relay.js --port 39321 --bind 0.0.0.0 --stun stun.l.google.com:19302 --rendezvous http://your-rendezvous:8080 --turn turn.example.com:3478
+```
+
+### Test peer client
 
 ```bash
 node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567890"

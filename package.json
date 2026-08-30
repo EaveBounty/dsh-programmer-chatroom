@@ -66,8 +66,5 @@
     "client": {
       "platform": "web"
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
   }
 }

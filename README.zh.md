@@ -44,16 +44,39 @@ DSH 插件宿主半区只暴露 `ctx/harness/btoa/atob/TextEncoder/Decoder/conso
 
 ## 安装
 
-聊天插件以动态 Cordis 插件形式定义（`cordis_define`），中继是纯 Node 脚本。在 DSH 会话中加载插件包后，
-插件会通过宿主 `subprocess` 自动拉起中继。
+这是一个**标准 DSH 插件包**，可从 npm 安装并在 DSH web profile 中加载。
 
-独立运行中继（局域网 peer / 调试）：
+### 从 npm 安装
 
 ```bash
-node dshc-relay.js --port 39321 --bind 0.0.0.0 --name nodeA
+# 安装到你的 DSH profile（推荐）
+dsh plugin --profile web add @eave_bounty/dsh-programmer-chatroom
+
+# 或全局安装 npm 包
+npm install -g @eave_bounty/dsh-programmer-chatroom
 ```
 
-测试 peer 客户端：
+安装后**重启 DSH**，插件自动加载，web profile 侧边栏底部会出现 **💬 群聊** 按钮。
+
+### 从源码 / 本地路径
+
+```bash
+dsh plugin --profile web add <本仓库路径>
+# 或
+pnpm add file:<本仓库路径>
+```
+
+### 独立运行中继（局域网 peer / 调试 / NAT）
+
+```bash
+# 在 0.0.0.0 上运行伴生中继
+node dshc-relay.js --port 39321 --bind 0.0.0.0 --name nodeA
+
+# 可选 NAT 穿越（STUN + rendezvous + TURN）
+node dshc-relay.js --port 39321 --bind 0.0.0.0 --stun stun.l.google.com:19302 --rendezvous http://your-rendezvous:8080 --turn turn.example.com:3478
+```
+
+### 测试 peer 客户端
 
 ```bash
 node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567890"
