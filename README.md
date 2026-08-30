@@ -148,3 +148,7 @@ LICENSE                  # MIT
 ## License
 
 [MIT](LICENSE) © EaveBounty.
+
+## 修改日志
+
+- 2026-08-20 修复启动失败：`lib/index.js` 直接访问 `ctx.harness` 但未在 `inject` 声明，Cordis 严格代理抛「cannot get property "harness" without inject」。改为 `ctx.get('harness')` 可选访问（服务不存在时返回 undefined、不等待），harness.handle RPC 集成保持可选。
