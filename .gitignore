@@ -1,0 +1,22 @@
+# ---- 安全：绝不提交凭据/密钥 ----
+.secrets/
+*.env
+.env.*
+credentials*.json
+*.token
+*.pem
+*.key
+
+# ---- 运行时/临时文件 ----
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+.dshc-relay-*/
+state.json
+outbox.ndjson
+
+# ---- 打包/构建产物 ----
+dist/
+build/
+*.tgz
