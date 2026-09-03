@@ -61,3 +61,19 @@ wrangler deploy
 
 - Worker 侧已做：字段长度上限、控制字符剥离、`httpUrl` 必须 `^https?://` 且无空白/`@`、body 上限、错误 500 不泄内部。
 - 插件侧只把**审核通过后**的消息写入 mesh，违规内容永不外泄到任何节点/站点。
+
+## 6. v1.2 部署基址与端点（已更新 `workers/rendezvous.js`）
+
+- 实际挂载基址：`https://chatroom.iloveljn.cn/machine_list`（插件与中继调用统一用这个 base）。
+- Worker 自动剥 `machine_list` 前缀，兼容裸路径（`/announce` 与 `/machine_list/announce` 等价）。
+- 端点：
+  | 方法与路径（相对于 base） | 作用 |
+  |---|---|
+  | `POST /announce` | 单机心跳上报/刷新（保底 TTL≈1h） |
+  | `DELETE /announce` | 优雅下线 |
+  | `GET /nodes?alive=60` | 取最近 alive 秒内在线节点 |
+  | `GET /bootstrap?alive=3600` | 冷启动保底目录（长窗口，供 ping 不通时的机器取表） |
+  | `POST /merge` | 批量合并上报（体 `{nodes:[...]}` 或裸数组；每 ~10 分钟由 3–4 台机器刷新保底目录） |
+- 频控目标（v1.2 去中心化地址表同步后）：单机稳态对站点请求极低（冷启动 bootstrap + 10 分钟 merge + 60s announce），远低于 CF 免费限额。
+- 部署后把 `https://chatroom.iloveljn.cn/machine_list` 填入插件的站点框即可。
+
