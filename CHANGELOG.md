@@ -2,7 +2,18 @@
 
 本项目版本遵循 [Keep a Changelog](https://keepachangelog.com/) 与 [Semantic Versioning](https://semver.org/)。
 
-## [Unreleased]
+## [Unreleased] (v1.2.0)
+
+- 固定聊天端口 39321：所有机器一致，局域网扫描与互联网穿透都走它。
+- 公网站点改挂 `https://chatroom.iloveljn.cn/machine_list`；Worker 新增 `/bootstrap`(保底)、`/merge`(批量刷新保底目录)、长 TTL、自动剥前缀。
+- 去中心化地址表同步：伴生中继局域网 /24 固定端口扫描 + 机器间 ping/MD5 gossip 合并 + cpolar 本地 9200 探测公网地址 + Workers 冷启动/保底刷新。
+- cpolar 一键启动改为直接 spawn（修复「点了没反应」）；公网地址由中继探测。
+- 模式切换按钮移入聊天页（🏠局域网↔🌐互联网，带动画/图标，自动记忆上次）；发送按钮加锁去抖防重发。
+- 设置页去掉「我的设备」「网络模式」卡；昵称分局域网/互联网两类、互联网未开穿透则置灰、保存时当前网络唯一性校验。
+- 宿主 netmode/rendezvous 跨重启持久化（`~/.dshc-chatmode.json`）。
+- 新增 `docs/DESIGN-v1.2.md`（v1.2 设计定稿）。
+
+## [1.1.0] - 2026-09-02
 
 - 网络模式：局域网(默认) UDP 信标自动发现同网段节点并尝试直连；互联网模式一键 cpolar 穿透 + 上报/拉取公网站点节点目录。
 - 公网站点：新增 `workers/rendezvous.js`（Cloudflare Workers + KV 在线节点目录）+ `docs/RENDEZVOUS.md` 部署/协议。

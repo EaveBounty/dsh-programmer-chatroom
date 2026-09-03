@@ -30,6 +30,9 @@
  */
 
 const http = require('http')
+const https = require('https')
+const crypto = require('crypto')
+const path = require('path')
 const os = require('os')
 const dgram = require('dgram')
 
@@ -285,52 +288,452 @@ function pruneLanPeers() {
     if (now - t > 25000) {
       autoPeers.delete(u)
       peerSince.delete(u)
+      // 若该地址是 /24 扫描写入 manualPeers 的，一并回收，避免已下线主机成为僵尸对端
+      if (scanManual.has(u)) {
+        scanManual.delete(u)
+        manualPeers = manualPeers.filter(x => x !== u)
+      }
+      peerNameByUrl.delete(u)
       changed = true
     }
   }
   if (changed) recomputePeers()
 }
 
+// 低频 announce（B5）：仅 net 模式且配置了 rendezvous 时，约每 60s 报到一次
 function rdvAnnounce() {
   if (netMode.mode !== 'net' || !netMode.rendezvous) return
   const now = Date.now()
-  if (now - lastAnnounce < 8000) return
+  if (now - lastAnnounce < 60000) return
   lastAnnounce = now
   const base = netMode.rendezvous.replace(/\/+$/, '')
-  try {
-    const body = JSON.stringify({ deviceId: name, nodeId: name, name: name, httpUrl: netMode.public || null, lanIP: lanIPs[0] || null })
-    const req = http.request(base + '/announce', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) { res.resume() })
-    req.on('error', function () {})
-    req.write(body); req.end()
-  } catch (e) {}
-  http.get(base + '/nodes?alive=90', function (r) {
-    let b = ''
-    r.on('data', c => { b += c })
-    r.on('end', function () {
+  if (!base) return
+  outPost(base + '/announce', { deviceId: name, nodeId: name, name: name, httpUrl: netMode.public || null, lanIP: lanIPs[0] || null }, 3000)
+}
+
+// 周期拉取 rendezvous 节点目录（既有行为，8s 节流），刷新 rdvPeers 并回收超时项
+function rdvNodes() {
+  if (netMode.mode !== 'net' || !netMode.rendezvous) return
+  const now = Date.now()
+  if (now - lastRdvNodes < 8000) return
+  lastRdvNodes = now
+  const base = netMode.rendezvous.replace(/\/+$/, '')
+  if (!base) return
+  outGet(base + '/nodes?alive=90', 5000, function (err, res, body) {
+    if (err || !res || res.statusCode !== 200) return
+    try {
+      const d = JSON.parse(body || '')
+      const arr = (d && Array.isArray(d.nodes)) ? d.nodes : []
+      const now2 = Date.now()
+      let changed = false
+      for (const n of arr) {
+        if (!n || n.deviceId === name || n.nodeId === name) continue
+        const u = String(n.httpUrl || n.httpsUrl || '').replace(/\/$/, '')
+        if (!validPeer(u) || isSelfUrl(u)) continue
+        if (!rdvPeers.has(u)) peerSince.delete(u)
+        rdvPeers.set(u, now2)
+      }
+      for (const [u, t] of Array.from(rdvPeers)) {
+        if (now2 - t > 120000) {
+          rdvPeers.delete(u)
+          peerSince.delete(u)
+          changed = true
+        }
+      }
+      if (changed || arr.length) recomputePeers()
+    } catch (e) {}
+  })
+}
+
+// ==================== 新增功能 A：LAN /24 同端口扫描（mode lan） ====================
+// 与 UDP 信标并存：某些网络屏蔽 UDP 广播时，仍可通过主动探测同网段、同 HTTP 端口
+// (args.port，默认 39321) 的 /health 发现对端。扫描跑在独立定时器上，绝不阻塞 poll()。
+
+const peerNameByUrl = new Map()   // 对端 url -> /health 上报的 name
+const scanManual = new Set()      // 由扫描写入 manualPeers 的 url（下线时回收）
+const failByUrl = new Map()       // 对端 url -> /health 连续失败次数
+const LAN_SCAN_TICK = 2000        // 扫描调度定时器周期（2s 看一眼门闩）
+const LAN_PASS_GAP = 20000        // 完整一轮扫描至少间隔 ~20s
+const SCAN_CONCURRENCY = 8        // 探测并发上限（≤8 在途）
+const SCAN_TIMEOUT = 900          // 单台 /health 探测超时（ms）
+let lanScanBusy = false
+let lanLastPass = 0
+
+// 通用并发小池：list 上最多 conc 个 worker 同时在飞；任何异常都被吞掉，绝不抛出
+function runPool(list, worker, conc, onEach) {
+  return new Promise(function (resolve) {
+    if (!list.length) return resolve()
+    let i = 0, act = 0
+    const finish = function () { if (act === 0 && i >= list.length) resolve() }
+    const fill = function () {
+      while (act < conc && i < list.length) {
+        const item = list[i++]
+        act++
+        Promise.resolve().then(function () { return worker(item) }).catch(function () { return null }).then(function (res) {
+          act--
+          try { if (onEach) onEach(item, res) } catch (e) {}
+          fill()
+          finish()
+        })
+      }
+      finish()
+    }
+    fill()
+  })
+}
+
+// 探测单台主机：GET http://ip:port/health，200 且 {ok:true} 才算命中
+function lanProbeHost(ip) {
+  const url = 'http://' + ip + ':' + args.port
+  return new Promise(function (resolve) {
+    outGet(url + '/health', SCAN_TIMEOUT, function (err, res, body) {
+      if (err || !res || res.statusCode !== 200) return resolve(null)
       try {
-        const d = JSON.parse(b)
-        const arr = (d && Array.isArray(d.nodes)) ? d.nodes : []
-        const now2 = Date.now()
-        for (const n of arr) {
-          if (!n || n.deviceId === name || n.nodeId === name) continue
-          const u = (n.httpUrl || n.httpsUrl || '').replace(/\/$/, '')
-          if (!validPeer(u)) continue
-          if (!rdvPeers.has(u)) peerSince.delete(u)
-          rdvPeers.set(u, now2)
+        const j = JSON.parse(body || '')
+        if (j && j.ok === true) return resolve({ url: url, name: String(j.name || '').slice(0, 64) })
+      } catch (e) {}
+      resolve(null)
+    })
+  })
+}
+
+// 命中处理：写入 manualPeers（去重）+ autoPeers + recompute，并记录上报的 name
+function lanScanFound(url, repName) {
+  const now = Date.now()
+  const isNew = !autoPeers.has(url)
+  if (manualPeers.indexOf(url) < 0) { manualPeers.push(url); scanManual.add(url) }
+  autoPeers.set(url, now)
+  if (repName && peerNameByUrl.get(url) !== repName) peerNameByUrl.set(url, repName)
+  failByUrl.delete(url)
+  if (isNew) { peerSince.delete(url); console.log('[dshc-lan] scan hit ' + url + (repName ? ' name=' + repName : '')) }
+  recomputePeers()
+}
+
+// 一轮完整扫描：对本机每个 IPv4 /24 枚举主机 1..254，跳过本机 IP 与已知对端
+function lanScanPass() {
+  const nets = new Set()
+  for (const ip of lanIPs) {
+    const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(ip)
+    if (m) nets.add(m[1] + '.')
+  }
+  if (!nets.size) return Promise.resolve()
+  const known = new Set(peers)
+  const cands = []
+  for (const pre of nets) {
+    for (let h = 1; h <= 254; h++) {
+      const ip = pre + h
+      if (lanIPs.indexOf(ip) >= 0) continue           // 跳过本机 IP
+      const u = 'http://' + ip + ':' + args.port
+      if (known.has(u) || autoPeers.has(u)) continue  // 跳过已知对端
+      cands.push(ip)
+    }
+  }
+  return runPool(cands, lanProbeHost, SCAN_CONCURRENCY, function (ip, hit) {
+    if (hit) lanScanFound(hit.url, hit.name)
+  })
+}
+
+// 扫描调度：mode=lan 且距上次整轮 ≥~20s 才发起一轮（每次让出事件循环，不阻塞 poll）
+function lanScanTick() {
+  if (netMode.mode !== 'lan' || lanScanBusy) return
+  const now = Date.now()
+  if (now - lanLastPass < LAN_PASS_GAP) return
+  lanLastPass = now
+  lanScanBusy = true
+  lanScanPass().catch(function () {}).then(function () { lanScanBusy = false })
+}
+
+// ==================== 新增功能 B：公网地址表同步（net mode） ====================
+// 地址表 = manualPeers ∪ autoPeers ∪ rdvPeers（http(s) 基址）。表内容与 md5 会落到
+// stateFile 同目录的 table.json，供重启后的冷启动复用（stalePeers）。
+
+const TABLE_FILE = path.join(args.stateFile ? path.dirname(args.stateFile) : '.', 'table.json')
+let stalePeers = []             // 启动时从 table.json 读入的旧地址表
+let lastTableSig = null         // 上次落盘的表签名（去重排序后的 join('\n')）
+let lastRdvNodes = 0            // 节点目录拉取节流（8s）
+let lastAntiEntropy = 0         // 反熵对账节流（10s）
+let lastMergeTs = 0             // merge 保底节流（600s）
+let lastCpolarTs = 0            // cpolar 探测节流（15s）
+let antiPtr = 0                 // 反熵轮询游标
+let netColdDone = false         // 冷启动 bootstrap 仅做一次
+
+function tableUrls() {
+  const seen = {}
+  const arr = []
+  function add(u) {
+    const t = String(u || '').replace(/\/$/, '')
+    if (t && validPeer(t) && !seen[t]) { seen[t] = 1; arr.push(t) }
+  }
+  for (const m of manualPeers) add(m)
+  for (const k of autoPeers.keys()) add(k)
+  for (const k of rdvPeers.keys()) add(k)
+  arr.sort()
+  return arr
+}
+function tableMd5() { return crypto.createHash('md5').update(tableUrls().join('\n')).digest('hex') }
+function tableSize() { return tableUrls().length }
+
+// 内网/回环/保留段 IPv4 字面量判断；域名一律视为公网
+function isPrivateIpLiteral(ip) {
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(String(ip || ''))) return false
+  const p = String(ip).split('.').map(Number)
+  if (p.some(function (x) { return x > 255 })) return true
+  if (p[0] === 10) return true
+  if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true
+  if (p[0] === 192 && p[1] === 168) return true
+  if (p[0] === 127 || p[0] === 0 || p[0] === 169 || p[0] === 100) return true
+  return false
+}
+function isPublicUrl(u) {
+  try {
+    const o = new URL(String(u || ''), 'http://x')
+    if (o.protocol === 'https:') return true
+    return !isPrivateIpLiteral(o.hostname)
+  } catch (e) { return false }
+}
+function isSelfUrl(u) {
+  return !!netMode.public && String(netMode.public).replace(/\/$/, '') === String(u || '').replace(/\/$/, '')
+}
+
+// 统一出站 GET/POST（http/https 自适应；网络层全部 try/catch + error + 超时，绝不抛出）
+function outGet(url, timeoutMs, cb) {
+  let done = false
+  const fin = function (e, r, b) { if (!done) { done = true; cb(e, r, b) } }
+  try {
+    const mod = /^https:/i.test(url) ? https : http
+    const req = mod.get(url, { timeout: timeoutMs || 3000 }, function (res) {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', function (c) { if (body.length < (1 << 20)) body += c })
+      res.on('end', function () { fin(null, res, body) })
+      res.on('error', function () { fin(new Error('res')) })
+    })
+    req.on('timeout', function () { try { req.destroy() } catch (e) {} fin(new Error('timeout')) })
+    req.on('error', function (e) { fin(e) })
+  } catch (e) { fin(e) }
+}
+function outPost(url, obj, timeoutMs) {
+  let done = false
+  const fin = function () { if (!done) { done = true } }
+  try {
+    const body = Buffer.from(JSON.stringify(obj || {}))
+    const mod = /^https:/i.test(url) ? https : http
+    const req = mod.request(url, { method: 'POST', timeout: timeoutMs || 3000, headers: { 'Content-Type': 'application/json', 'Content-Length': body.length } }, function (res) {
+      res.resume()
+      res.on('end', fin)
+      res.on('error', fin)
+    })
+    req.on('timeout', function () { try { req.destroy() } catch (e) {} fin() })
+    req.on('error', fin)
+    req.write(body); req.end()
+  } catch (e) { fin() }
+}
+
+// 探测 url 的 /health：成功则重置失败计数并返回响应体；失败则累计失败并返回 null
+function probeHealth(url) {
+  return new Promise(function (resolve) {
+    outGet(String(url).replace(/\/$/, '') + '/health', 3000, function (err, res, body) {
+      let j = null
+      if (!err && res && res.statusCode === 200) {
+        try { const t = JSON.parse(body || ''); if (t && t.ok === true) j = t } catch (e) {}
+      }
+      if (j) {
+        failByUrl.delete(url)
+        if (j.name) peerNameByUrl.set(url, String(j.name).slice(0, 64))
+        resolve(j)
+      } else {
+        failByUrl.set(url, (failByUrl.get(url) || 0) + 1)
+        dropIfDown(url)
+        resolve(null)
+      }
+    })
+  })
+}
+// 下线（B8）：公网 rdv/manual 对端连续 3 次 /health 失败 → 从三者中移除并重算
+function dropIfDown(url) {
+  if ((failByUrl.get(url) || 0) < 3) return
+  if (!isPublicUrl(url)) { failByUrl.delete(url); return }
+  if (!rdvPeers.has(url) && manualPeers.indexOf(url) < 0) { failByUrl.delete(url); return }
+  rdvPeers.delete(url)
+  manualPeers = manualPeers.filter(function (x) { return x !== url })
+  scanManual.delete(url)
+  peerSince.delete(url)
+  peerNameByUrl.delete(url)
+  failByUrl.delete(url)
+  recomputePeers()
+  console.log('[dshc-net] drop down peer ' + url)
+}
+
+// cpolar 本地 API 探测本机公网 URL（B3）：15s 独立节流，仅在 net 模式；不可达则保持原值
+function cpolarProbe() {
+  if (netMode.mode !== 'net') return
+  const now = Date.now()
+  if (now - lastCpolarTs < 15000) return
+  lastCpolarTs = now
+  outGet('http://127.0.0.1:9200/api/tunnels', 1500, function (err, res, body) {
+    if (err || !res || res.statusCode !== 200) return // 不可达：netMode.public 保持不变
+    try {
+      const d = JSON.parse(body || '')
+      const list = (d && Array.isArray(d.tunnels)) ? d.tunnels : []
+      let best = null
+      for (const t of list) {
+        if (!t || String(t.public_url || '').slice(0, 8) !== 'https://') continue
+        const cfg = String((t.config && t.config.addr) || '')
+        if (cfg.indexOf(':' + args.port) >= 0) { best = t; break } // 优先：隧道目标指向本中继端口
+        if (!best) best = t                                        // 兜底：第一个 https 隧道
+      }
+      if (best && best.public_url) {
+        const u = String(best.public_url).replace(/\/+$/, '')
+        if (netMode.public !== u) { netMode.public = u; console.log('[dshc-net] cpolar public=' + u) }
+      }
+    } catch (e) {}
+  })
+}
+
+// 周期保底 merge（B6）：约每 600s 向 rendezvous 提交我们已知的在线公网地址表（至多 ~40 条）
+function rdvMerge() {
+  if (netMode.mode !== 'net' || !netMode.rendezvous) return
+  const now = Date.now()
+  if (now - lastMergeTs < 600000) return
+  lastMergeTs = now
+  const base = netMode.rendezvous.replace(/\/+$/, '')
+  if (!base) return
+  const urls = tableUrls().filter(function (u) { return isPublicUrl(u) && !isSelfUrl(u) }).slice(0, 40)
+  if (!urls.length) return
+  const nodes = []
+  for (const u of urls) {
+    let host = u
+    try { host = new URL(u).hostname } catch (e) {}
+    const nm = cleanNick(peerNameByUrl.get(u) || host)
+    nodes.push({ deviceId: nm, nodeId: nm, name: nm, httpUrl: u, lanIP: /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? host : null })
+  }
+  outPost(base + '/merge', { nodes: nodes }, 5000)
+}
+
+// 冷启动（B4）：无存活公网对端时，先试探 table.json 里的陈旧表，有存活即停；
+// 否则对 rendezvous 做一次 bootstrap（全生命周期仅这一次）
+function netColdStart() {
+  if (netMode.mode !== 'net' || !netMode.rendezvous || netColdDone) return
+  netColdDone = true
+  const base = netMode.rendezvous.replace(/\/+$/, '')
+  if (!base) return
+  const cands = []
+  for (const u of stalePeers) {
+    const t = String(u || '').replace(/\/$/, '')
+    if (validPeer(t) && isPublicUrl(t) && !isSelfUrl(t)) cands.push(t)
+  }
+  let found = false
+  runPool(cands, probeHealth, 3, function (u, j) {
+    if (j && !found) {
+      found = true
+      rdvPeers.set(u, Date.now())
+      if (manualPeers.indexOf(u) < 0) manualPeers.push(u)
+      recomputePeers()
+      console.log('[dshc-net] cold-start stale peer alive ' + u)
+    }
+  }).then(function () {
+    if (found) return
+    outGet(base + '/bootstrap?alive=3600', 6000, function (err, res, body) {
+      if (err || !res || res.statusCode !== 200) return
+      try {
+        const d = JSON.parse(body || '')
+        const arr = (d && Array.isArray(d.nodes)) ? d.nodes : (Array.isArray(d) ? d : [])
+        const now = Date.now()
+        let n = 0
+        for (const nd of arr) {
+          if (!nd || nd.nodeId === name || nd.deviceId === name) continue
+          const u = String(nd.httpUrl || nd.httpsUrl || '').replace(/\/$/, '')
+          if (!validPeer(u) || isSelfUrl(u)) continue
+          rdvPeers.set(u, now)
+          if (manualPeers.indexOf(u) < 0) manualPeers.push(u)
+          n++
         }
-        let changed = false
-        for (const [u, t] of Array.from(rdvPeers)) {
-          if (now2 - t > 120000) {
-            rdvPeers.delete(u)
-            peerSince.delete(u)
-            changed = true
-          }
-        }
-        if (changed || arr.length) recomputePeers()
+        if (n) { recomputePeers(); console.log('[dshc-net] cold-start bootstrap ' + n + ' nodes') }
       } catch (e) {}
     })
-  }).on('error', function () {})
+  })
 }
+
+// 反熵对账（B7）：约每 10s 抽查至多 3 个公网对端 /health；md5 不一致则拉取其 /peers 求并集
+function antiEntropy() {
+  if (netMode.mode !== 'net') return
+  const now = Date.now()
+  if (now - lastAntiEntropy < 10000) return
+  lastAntiEntropy = now
+  const pool = tableUrls().filter(function (u) { return isPublicUrl(u) && !isSelfUrl(u) && (failByUrl.get(u) || 0) < 3 })
+  if (!pool.length) return
+  const picks = []
+  for (let k = 0; k < 3 && picks.length < pool.length; k++) {
+    const u = pool[antiPtr % pool.length]
+    antiPtr++
+    if (picks.indexOf(u) < 0) picks.push(u)
+  }
+  for (const u of picks) reconcilePeer(u)
+}
+
+function reconcilePeer(u) {
+  probeHealth(u).then(function (j) {
+    if (!j) return // 失败计数与下线移除已在 probeHealth/dropIfDown 中处理
+    const theirMd5 = j.tableMd5
+    if (theirMd5 && theirMd5 !== tableMd5()) {
+      outGet(String(u).replace(/\/$/, '') + '/peers', 4000, function (err, res, body) {
+        if (err || !res || res.statusCode !== 200) return
+        try {
+          const d = JSON.parse(body || '')
+          if (!d || !Array.isArray(d.peers)) return
+          const theirs = []
+          for (const x of d.peers) {
+            const t = String(x || '').replace(/\/$/, '')
+            if (validPeer(t) && !isSelfUrl(t) && theirs.indexOf(t) < 0) theirs.push(t)
+          }
+          const now = Date.now()
+          let changed = false
+          for (const t of theirs) { // 并集：补齐对方有而我没有的地址
+            if (rdvPeers.has(t) || manualPeers.indexOf(t) >= 0) continue
+            if (autoPeers.has(t)) { autoPeers.set(t, now); continue }
+            rdvPeers.set(t, now)
+            if (manualPeers.indexOf(t) < 0) manualPeers.push(t)
+            changed = true
+          }
+          if (changed) recomputePeers()
+          // 对方已不再列出的地址：仅当我们自己也够不到时才丢弃（顺带累计失败计数）
+          const missing = tableUrls().filter(function (t) {
+            if (theirs.indexOf(t) >= 0 || isSelfUrl(t) || !isPublicUrl(t)) return false
+            return rdvPeers.has(t) || manualPeers.indexOf(t) >= 0
+          }).slice(0, 10)
+          runPool(missing, probeHealth, 4)
+        } catch (e) {}
+      })
+    }
+  })
+}
+
+// 落盘地址表（B2）：表内容变化时写 table.json（stateFile 同目录，缺省为当前目录）
+function persistTable() {
+  try {
+    const urls = tableUrls()
+    const sig = urls.join('\n')
+    if (sig === lastTableSig) return
+    lastTableSig = sig
+    const md5 = crypto.createHash('md5').update(sig).digest('hex')
+    fs.writeFileSync(TABLE_FILE, JSON.stringify({ ts: Date.now(), md5: md5, table: urls }))
+  } catch (e) {}
+}
+// 启动读回旧表 → stalePeers（供冷启动试探使用）
+function loadTableFile() {
+  try {
+    const t = JSON.parse(fs.readFileSync(TABLE_FILE, 'utf8'))
+    if (!t || !Array.isArray(t.table)) return
+    const seen = {}
+    stalePeers = []
+    for (const u of t.table) {
+      const x = String(u || '').replace(/\/$/, '')
+      if (x && validPeer(x) && !seen[x]) { seen[x] = 1; stalePeers.push(x) }
+    }
+    lastTableSig = stalePeers.join('\n')
+  } catch (e) {}
+}
+loadTableFile()
 
 // ---- HTTP server ----
 const server = http.createServer((req, res) => {
@@ -344,7 +747,7 @@ const server = http.createServer((req, res) => {
     }
     if (path === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, name, port: args.port, lanIPs, peers, messageCount: messages.length, lastIdx: nextIdx - 1 }))
+      res.end(JSON.stringify({ ok: true, name, port: args.port, lanIPs, peers, messageCount: messages.length, lastIdx: nextIdx - 1, httpUrl: netMode.public || null, tableMd5: tableMd5(), tableSize: tableSize() }))
       return
     }
     if (path === '/dsh-chat-relay') {
@@ -361,7 +764,7 @@ const server = http.createServer((req, res) => {
           const p = JSON.parse(body)
           const url = String(p.url || '').replace(/\/$/, '')
           if (p.action === 'add' && validPeer(url) && !manualPeers.includes(url)) { manualPeers.push(url); peerSince.delete(url) }
-          else if (p.action === 'remove' && url) { manualPeers = manualPeers.filter(x => x !== url); autoPeers.delete(url); rdvPeers.delete(url); peerSince.delete(url) }
+          else if (p.action === 'remove' && url) { manualPeers = manualPeers.filter(x => x !== url); autoPeers.delete(url); rdvPeers.delete(url); scanManual.delete(url); peerSince.delete(url); peerNameByUrl.delete(url) }
           recomputePeers()
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ peers }))
@@ -403,21 +806,25 @@ function readPeersFile() {
   recomputePeers()
 }
 function poll() {
-  readNetmode()
-  pruneLanPeers()
-  rdvAnnounce()
-  readPeersFile()
-  drainOutbox()
-  writeState()
-  for (const base of peers.slice()) {
-    const since = peerSince.get(base) || 0
-    const url = base.replace(/\/$/, '') + '/dsh-chat-relay?since=' + since
-    http.get(url, (r) => {
-      let b = ''
-      r.on('data', c => { b += c })
-      r.on('end', () => {
+  try {
+    readNetmode()
+    pruneLanPeers()
+    rdvAnnounce()          // 低频 announce（B5，60s 节流）
+    rdvNodes()             // 周期节点目录（既有行为，8s 节流）
+    antiEntropy()          // 反熵对账（B7，10s 节流，net 模式）
+    rdvMerge()             // 周期保底 merge（B6，600s 节流，net 模式）
+    netColdStart()         // 冷启动（B4）—— 仅在未做过且条件满足时执行一次
+    readPeersFile()
+    drainOutbox()
+    writeState()
+    persistTable()         // 地址表内容变化时落盘（B2）
+    for (const base of peers.slice()) {
+      const since = peerSince.get(base) || 0
+      const url = base.replace(/\/$/, '') + '/dsh-chat-relay?since=' + since
+      outGet(url, 6000, function (err, res, b) {
+        if (err || !res || res.statusCode !== 200) return
         try {
-          const body = JSON.parse(b)
+          const body = JSON.parse(b || '')
           if (body && Array.isArray(body.messages)) {
             for (const m of body.messages) {
               if (!m.msgId || seen.has(m.msgId)) continue
@@ -427,8 +834,8 @@ function poll() {
           }
         } catch (e) {}
       })
-    }).on('error', () => {})
-  }
+    }
+  } catch (e) {}
 }
 setInterval(poll, 2000)
 
@@ -445,6 +852,10 @@ server.listen(args.port, args.bind, () => {
     name, args.bind, args.port, peers.length, lanIPs.join(','), args.stateFile || 'off')
   openUDPPunch()
   initNAT()
+  // 新增：A/B 功能挂载 —— LAN 扫描节拍、cpolar 公网 URL 探测、net 冷启动
+  setInterval(lanScanTick, LAN_SCAN_TICK)
+  setInterval(cpolarProbe, 15000)
+  netColdStart()
 })
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)))
