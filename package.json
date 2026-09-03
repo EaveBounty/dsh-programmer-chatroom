@@ -1,6 +1,6 @@
 {
   "name": "@eave_bounty/dsh-programmer-chatroom",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Decentralized P2P group chat for DeepSeek Harness (DSH): every machine is a relay server, text moderated offline by an embedded DFA sensitive-word filter, with a WeChat/QQ-style DeepSeek-branded UI.",
   "license": "MIT",
   "type": "module",

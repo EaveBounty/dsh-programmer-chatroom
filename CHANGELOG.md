@@ -2,7 +2,13 @@
 
 本项目版本遵循 [Keep a Changelog](https://keepachangelog.com/) 与 [Semantic Versioning](https://semver.org/)。
 
-## [Unreleased] (v1.2.0)
+## [Unreleased] (v1.2.1)
+
+- 内网穿透改为「命令行 + 粘贴公网地址」：不再由插件一键 spawn cpolar（原方案会卡死/权限不足）；用户自己终端跑 `cpolar http 127.0.0.1:39321`，把输出的公网地址粘贴保存即可。
+- 互联网模式门控：未设置公网地址前，禁止切到互联网模式、也不访问 Cloudflare；避免仅需局域网的用户浪费请求次数。
+- 修复设置页自动闪回：资料草稿只在打开时播种一次（不再每秒被重置）；设置页停用消息轮询刷新。
+
+## [1.2.0] - 2026-09-02
 
 - 固定聊天端口 39321：所有机器一致，局域网扫描与互联网穿透都走它。
 - 公网站点改挂 `https://chatroom.iloveljn.cn/machine_list`；Worker 新增 `/bootstrap`(保底)、`/merge`(批量刷新保底目录)、长 TTL、自动剥前缀。
