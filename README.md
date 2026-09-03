@@ -25,6 +25,7 @@
 - [Contributing](CONTRIBUTING.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security audit](docs/SECURITY.md)
+- [Rendezvous site / Workers deploy](docs/RENDEZVOUS.md)
 - [Changelog](CHANGELOG.md)
 
 ## Overview
@@ -35,14 +36,16 @@
 - **Content moderation**: every node filters each message offline with an embedded **DFA sensitive-word
   filter + Chinese lexicon**. Blocked messages never enter the room and are dropped **silently** — no
   records, no monitoring page, zero perceptible feedback (see `docs/SECURITY.md`).
-- **WeChat/QQ-style UI**: chat bubbles, colored avatars, emoji picker, sticker pack, an ✨ Enjoy button,
-  live peer-node management, and a **member roster**.
-- **Theme-aware**: the panel reads the shell's `--dsw-alias-*` tokens, so it follows DeepSeek's dark/light
-  appearance automatically (dark → current palette, light → white/blue).
-- **Member identity**: each machine gets a stable deviceId with an **auto-assigned unique avatar color and
-  random, collision-avoided nickname**; editable in the **Settings** tab.
+- **WeChat/QQ-style UI**: chat bubbles, colored avatars, emoji picker, sticker pack, an ✨ Enjoy button, and a
+  **member roster**. The panel is a fixed **DeepSeek blue-white (light)** theme, and the **Chat view shows only
+  messages** (no node/peer chatter that distracts the conversation).
+- **Member identity**: each machine derives a stable deviceId from its hardware fingerprint (locally unique) and
+  gets an **auto-assigned unique avatar color + random, collision-avoided nickname**; editable in the **Settings** tab.
+- **Display settings**: adjust **bubble spacing / letter spacing / font size** live from Settings (remembered).
+- **Two network modes**: **LAN** (UDP beacon auto-discovers and directly connects same-subnet DSH nodes) or
+  **Internet** (one-click cpolar tunnel + announce/pull a Cloudflare-Workers rendezvous site → chat across NAT).
 - **One-click cpolar tunnel**: install command + start/stop inside the Settings tab; the plugin manages
-  the process and stops it automatically when the chat/plugin closes.
+  the process and stops it (and the site announce) automatically when the chat/plugin closes.
 - **No persistence**: history lives only in the memory of online machines; it disappears when all are off.
 
 ## Why decentralized?
@@ -99,15 +102,15 @@ node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567
 ## Quick start
 
 1. Load the plugin in a DSH session; a **💬 Chat** button appears in the sidebar footer.
-2. Open the floating panel — the top bar shows **🟢 Companion relay enabled · port**.
-3. **Chat** tab: read/write messages (Enter to send), manage peer nodes.
-   **Members** tab: see who is online. **Settings** tab: edit your nickname/avatar color, and one-click
-   start/stop the cpolar tunnel.
-4. To mesh with another DSH instance: in **已连接的节点**, enter
-   `http://<other-machine-IP>:<other-port>` → **Add node**. Add each other mutually.
-5. Across NAT: open the **Settings** tab → **内网穿透** → install cpolar (`npm i -g cpolar`, free account
-   `cpolar authtoken <token>`) → **一键启动穿透**. Share the resulting public URL with remote machines;
-   the tunnel stops automatically when the chat/plugin closes.
+2. Open the floating panel. The **Chat** view shows only messages.
+3. **Chat** tab: read/write messages (Enter to send). **Members** tab: who is online. **Settings** tab: edit
+   nickname/avatar color, adjust bubble spacing/letter-spacing/font-size, and switch network mode.
+4. **LAN (default)**: same-subnet DSH nodes are auto-discovered and connected (UDP beacon) — no manual entry.
+   Manual add is available under Settings → 网络模式.
+5. **Internet (across NAT)**: Settings → 网络模式 → **互联网**, fill your Cloudflare Workers site URL
+   (deploy per `docs/RENDEZVOUS.md`), then **内网穿透** → install cpolar (`npm i -g cpolar`, free account
+   `cpolar authtoken <token>`) → **一键启动穿透**. The plugin announces your public URL and pulls peers.
+   The tunnel + announce stop automatically when the chat/plugin closes.
 
 ## How P2P works
 
@@ -125,12 +128,12 @@ Machine A                                            Machine B
 └────────────────────────────┘                      └────────────────────────────┘
 ```
 
-- **Same LAN**: both relays bind `0.0.0.0`; each side fills the other's LAN IP. Verified: the plugin
-  spawns a relay reachable at `http://<machine-IP>:<port>/health` → 200.
-- **Across NAT / public internet**: the relay has STUN hole-punching + TURN/rendezvous hooks, but the
-  **recommended one-click path is cpolar**: start a tunnel to `127.0.0.1:<relayPort>` from the Settings
-  tab, share the public URL, and remote machines add it as a peer node. The plugin auto-stops the tunnel
-  with the chat.
+- **Same LAN (LAN mode)**: each relay listens on `0.0.0.0` and broadcasts a **UDP beacon**; discovering a
+  same-subnet node it auto-confirms via `GET http://<ip>:<port>/health` and joins the mesh (no manual entry).
+  Verified: relay `/health` → 200.
+- **Across NAT (Internet mode)**: the relay announces this machine's cpolar **public URL** to your Cloudflare
+  Workers rendezvous site and pulls other online nodes' public URLs to connect directly. See
+  `docs/RENDEZVOUS.md`. The plugin auto-stops the tunnel and its announce when the chat closes.
 
 ## Content moderation
 
@@ -145,9 +148,13 @@ Machine A                                            Machine B
 ## Project layout
 
 ```
-dshc-relay.js            # companion relay (full Node; binds 0.0.0.0; HTTP mesh + file IPC)
+dshc-relay.js            # companion relay (full Node; 0.0.0.0; HTTP mesh + UDP beacon + file IPC)
 dshc-relay-test-peer.js  # LAN test peer client
+workers/rendezvous.js    # Cloudflare Workers rendezvous site (online node directory)
+workers/wrangler.example.toml
 docs/ARCHITECTURE.md     # architecture & IPC protocol
+docs/SECURITY.md         # security audit & hardening
+docs/RENDEZVOUS.md       # rendezvous protocol + Workers deploy
 CONTRIBUTING.md          # contribution guide
 CHANGELOG.md             # version history
 LICENSE                  # MIT

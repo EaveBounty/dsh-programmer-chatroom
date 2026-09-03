@@ -24,6 +24,7 @@
 - [贡献](CONTRIBUTING.md)
 - [架构](docs/ARCHITECTURE.md)
 - [安全审计](docs/SECURITY.md)
+- [公网站点协议 (Workers)](docs/RENDEZVOUS.md)
 - [更新日志](CHANGELOG.md)
 
 ## 概述
@@ -32,11 +33,13 @@
   真实服务器。节点间通过 HTTP 拉取合并、按全局 `msgId` 去重——没有中央服务器，任何在线机器都能中继。
 - **内容监控**：每台节点本地离线对每条消息做**内嵌 DFA 敏感词过滤 + 中文词库**。拦截的消息在发送端
   **静默丢弃**——不记录、无监控页、发送者零体感（见 `docs/SECURITY.md`）。
-- **微信/QQ 质感 UI**：聊天气泡、彩色头像、Emoji 选择器、表情包、✨Enjoy 按钮、在线节点管理、**成员名单**。
-- **主题自适应**：面板读取 shell 的 `--dsw-alias-*` 令牌，随 DeepSeek 深色/日间自动切换（深色沿用当前配色、
-  日间切为白蓝）。
-- **成员身份**：每台机器分配稳定 `deviceId`，自动分配**不同颜色头像 + 随机不撞名昵称**，可在**设置**页修改。
-- **一键 cpolar 穿透**：设置页内提供安装命令 + 一键启动/停止；插件自动管理进程，随群聊/插件关闭自动停止。
+- **微信/QQ 质感 UI**：聊天气泡、彩色头像、Emoji 选择器、表情包、✨Enjoy、**成员名单**；面板固定为
+  **DeepSeek 白蓝浅色**，聊天页**只显示消息**（无节点干扰）。
+- **成员身份**：每台机器由硬件指纹派生稳定 `deviceId`，自动分配**不同颜色头像 + 随机不撞名昵称**，
+  可在**设置**页修改。
+- **显示设置**：设置页可调**气泡间距 / 字距 / 字号**，实时生效并记忆。
+- **双网络模式**：可切换 **局域网**（UDP 信标自动发现同网段节点并尝试直连）或 **互联网**（一键 cpolar 穿透
+  + 上报到你的 Cloudflare Workers 站点，跨 NAT 互聊）。
 - **不持久化**：聊天记录只存于在线机器的内存，全部关闭即消失。
 
 ## 为什么去中心化
@@ -90,13 +93,15 @@ node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567
 ## 快速开始
 
 1. 在 DSH 会话加载插件，侧边栏底部出现 **💬 群聊** 按钮。
-2. 打开浮动面板——顶部显示 **🟢 伴生中继已启用 · 端口**。
-3. **聊天**页：收发消息（Enter 发送）、管理节点；**成员**页：查看在线成员；**设置**页：改昵称/头像颜色、
-   一键启停 cpolar 穿透。
-4. 与另一台 DSH 互通：在**已连接的节点**里填 `http://<对方机器IP>:<对方端口>` → **添加节点**，
-   双方互相添加即可双向 mesh。
-5. 跨 NAT：**设置**页 → **内网穿透** → 安装 cpolar（`npm i -g cpolar`，免费账号 `cpolar authtoken <token>`）→
-   **一键启动穿透**。把生成的公网地址发给远端机器即可互通；群聊/插件关闭时隧道自动停止。
+2. 打开浮动面板——**聊天**页只显示消息；**成员**页看在线成员；**设置**页改昵称/头像颜色、调气泡间距/字距/字号。
+3. **局域网聊天（默认）**：同网段多台 DSH 会被**自动发现并直连**（UDP 信标），无需手填；也可在
+   设置→网络模式里手动添加 `http://<对方机器IP>:<对方端口>`。
+4. **互联网聊天（跨 NAT）**：
+   - 先在 **设置 → 网络模式** 切到「互联网」并填你的 Cloudflare Workers 站点地址（部署见
+     [docs/RENDEZVOUS.md](docs/RENDEZVOUS.md)）；
+   - 再到 **内网穿透** 一键启动 cpolar（`npm i -g cpolar`，免费账号 `cpolar authtoken <token>`），拿到公网地址；
+   - 插件自动把公网地址上报到站点、拉回其它在线节点的公网地址并直连。
+5. 关闭群聊/插件时，隧道与上报自动停止，节点目录约 5 分钟过期消失。
 
 ## P2P 如何实现
 
@@ -114,10 +119,10 @@ node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567
 └────────────────────────────┘                    └────────────────────────────┘
 ```
 
-- **同一局域网**：两台中继都绑 `0.0.0.0`，互填对方局域网 IP。已验证：插件拉起的中继在
-  `http://<本机IP>:<端口>/health` 返回 200。
-- **跨公网 NAT**：中继内置 STUN 打洞 + TURN/rendezvous 钩子，但**推荐的一键路径是 cpolar**：在设置页对
-  `127.0.0.1:<中继端口>` 启动隧道，把公网地址发给远端机器并添加为节点即可跨网互通；插件随群聊自动停隧道。
+- **同一局域网（局域网模式）**：每台中继在 `0.0.0.0` 上监听，并**周期广播 UDP 信标**；发现同网段节点后
+  自动 `GET http://<对方IP>:<对方端口>/health` 确认并加入 mesh（无需手填）。已验证：中继 `/health` 返回 200。
+- **跨公网 NAT（互联网模式）**：中继把本机 cpolar 公网地址**上报**到你的 Cloudflare Workers 站点，并**拉取**
+  其它在线节点的公网地址后直连。做法见 [docs/RENDEZVOUS.md](docs/RENDEZVOUS.md)；插件随群聊自动停隧道并撤销上报。
 
 ## 内容监控
 
@@ -131,10 +136,13 @@ node dshc-relay-test-peer.js Alice "hello everyone" "sk-should-be-blocked1234567
 ## 项目结构
 
 ```
-dshc-relay.js            # 伴生中继（完整 Node；绑定 0.0.0.0；HTTP mesh + 文件 IPC）
+dshc-relay.js            # 伴生中继（完整 Node；0.0.0.0；HTTP mesh + UDP 信标 + 文件 IPC）
 dshc-relay-test-peer.js  # 局域网测试 peer 客户端
+workers/rendezvous.js    # Cloudflare Workers 公网站点（在线节点目录）
+workers/wrangler.example.toml
 docs/ARCHITECTURE.md     # 架构与 IPC 协议
 docs/SECURITY.md         # 安全审计与加固报告
+docs/RENDEZVOUS.md       # 公网站点协议 + Workers 部署
 CONTRIBUTING.md          # 贡献指南
 CHANGELOG.md             # 更新日志
 LICENSE                  # MIT

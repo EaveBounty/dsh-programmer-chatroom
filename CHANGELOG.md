@@ -4,7 +4,14 @@
 
 ## [Unreleased]
 
-- 跨公网 NAT：伴生中继 STUN 打洞 + TURN 备选（规划中）。
+- 网络模式：局域网(默认) UDP 信标自动发现同网段节点并尝试直连；互联网模式一键 cpolar 穿透 + 上报/拉取公网站点节点目录。
+- 公网站点：新增 `workers/rendezvous.js`（Cloudflare Workers + KV 在线节点目录）+ `docs/RENDEZVOUS.md` 部署/协议。
+- 稳定机器身份：伴生中继用硬件指纹(hostname+CPU+网卡)派生稳定 node id；成员 `deviceId` 本地同机唯一。
+- 设置页：新增网络模式、气泡间距/字距/字号、我的设备(设备ID)。
+- UI：面板固定 DeepSeek 白蓝浅色；聊天页只显示消息(去掉节点/中继提示)。
+- 红队攻防轮加固：宿主 POST 强制 JSON 且限体 64KB(挡 loopback CSRF/本地 DoS)；`rendezvous` URL 校验防控制文件行注入；
+  `deviceId/nodeId` 字符白名单；去重风暴修复(seen 会话内不淘汰 + 客户端数组截断)；独立/内嵌 relay 的 color/deviceId 对齐。
+- 更新 `docs/SECURITY.md`(暴露面/残余风险如实重述)、`docs/RENDEZVOUS.md`(站点协议+部署)。
 
 ## [1.0.1] - 2026-09-01
 
